@@ -9,6 +9,7 @@ class InvoiceState(TypedDict, total=False):
     file_hash: str
     invoice_id: int | str | None
     is_invoice: bool
+    duplicate: bool
 
     # Extracted invoice fields. TODO: replace the loose mapping with a validated
     # Pydantic Invoice model once the extraction schema is implemented.
