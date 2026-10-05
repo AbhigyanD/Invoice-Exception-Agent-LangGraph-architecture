@@ -1,18 +1,32 @@
-"""Build the invoice workflow graph with deterministic placeholder nodes."""
+"""Build the invoice workflow graph."""
 
 from decimal import Decimal
 from typing import Literal
 
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 
 from app.config import settings
+from app.graph.schemas import ClassifyResult, ExtractedInvoice
 from app.graph.state import InvoiceState
 from app.tools.audit import write_audit_event
 from app.tools.erp import post_invoice
 from app.tools.ingest import find_or_create_invoice, hash_file
+from app.tools.llm import get_llm
 from app.tools.match import find_vendor_id, three_way_match
 from app.tools.policy import evaluate_policy
 from app.tools.db import get_conn
+
+CLASSIFY_SYSTEM_PROMPT = (
+    "You decide whether a document is a supplier invoice requesting payment. "
+    "Purchase orders, packing slips, and delivery receipts are not invoices."
+)
+
+EXTRACT_SYSTEM_PROMPT = (
+    "Extract the vendor name, PO number, currency, invoice date, subtotal, "
+    "total amount, and line items (item, qty, unit_price) from this invoice. "
+    "Set confidence between 0 and 1 based on how legible and complete the document is."
+)
 
 
 def ingest_node(state: InvoiceState) -> dict:
@@ -29,27 +43,31 @@ def ingest_node(state: InvoiceState) -> dict:
 
 
 def classify_node(state: InvoiceState) -> dict:
-    """Placeholder document classifier."""
-    # TODO: classify the document using its content and route non-invoices to reject.
-    print(f"classify_node: classifying document {state.get('file_path')}")
-    return {"is_invoice": True}
+    """Decide whether the document text is a supplier invoice."""
+    document_text = state.get("document_text", "")
+    llm = get_llm().with_structured_output(ClassifyResult)
+    result: ClassifyResult = llm.invoke(
+        [
+            SystemMessage(content=CLASSIFY_SYSTEM_PROMPT),
+            HumanMessage(content=document_text or "(empty document)"),
+        ]
+    )
+    print(f"classify_node: is_invoice={result.is_invoice} reason={result.reason}")
+    return {"is_invoice": result.is_invoice}
 
 
 def extract_node(state: InvoiceState) -> dict:
-    """Return fixed invoice fields; second pass simulates a repaired extraction."""
-    # TODO: extract vendor, PO, line items, totals, dates, and confidence into a schema.
-    print(f"extract_node: extracting fields for document {state.get('file_path')}")
-
-    fields = {
-        "vendor_name": "Northstar Office Supply",
-        "po_number": "PO-STUB-001",
-        "currency": "CAD",
-        "subtotal": 650.00 if state.get("retry_count", 0) else 649.00,
-        "total_amount": 650.00,
-        "lines": [{"item": "Copy paper, A4", "qty": 100, "unit_price": 6.50}],
-        "confidence": 0.98,
-    }
-    print(f"extract_node: extracted fields for document {state.get('file_path')}: {fields}")
+    """Extract invoice fields from the document text into a validated schema."""
+    document_text = state.get("document_text", "")
+    llm = get_llm().with_structured_output(ExtractedInvoice)
+    result: ExtractedInvoice = llm.invoke(
+        [
+            SystemMessage(content=EXTRACT_SYSTEM_PROMPT),
+            HumanMessage(content=document_text or "(empty document)"),
+        ]
+    )
+    fields = result.model_dump()
+    print(f"extract_node: extracted fields: {fields}")
     return {"invoice_fields": fields}
 
 
@@ -87,9 +105,30 @@ def validate_node(state: InvoiceState) -> dict:
 
 
 def repair_node(state: InvoiceState) -> dict:
-    """Placeholder repair step; the following extract pass uses the retry count."""
-    # TODO: feed validation errors and original evidence to a bounded repair prompt.
-    return {"retry_count": state.get("retry_count", 0) + 1}
+    """Re-extract with the prior attempt and its validation errors in the prompt."""
+    document_text = state.get("document_text", "")
+    errors = state.get("validation_errors", [])
+    previous_fields = state.get("invoice_fields", {})
+
+    llm = get_llm().with_structured_output(ExtractedInvoice)
+    result: ExtractedInvoice = llm.invoke(
+        [
+            SystemMessage(content=EXTRACT_SYSTEM_PROMPT),
+            HumanMessage(content=document_text or "(empty document)"),
+            AIMessage(content=str(previous_fields)),
+            HumanMessage(
+                content=(
+                    "That extraction failed validation with these errors:\n"
+                    + "\n".join(f"- {error}" for error in errors)
+                    + "\nCorrect the fields and return the full, corrected invoice."
+                )
+            ),
+        ]
+    )
+    fields = result.model_dump()
+    retry_count = state.get("retry_count", 0) + 1
+    print(f"repair_node: retry {retry_count}, corrected fields: {fields}")
+    return {"invoice_fields": fields, "retry_count": retry_count}
 
 
 def match_node(state: InvoiceState) -> dict:
@@ -244,9 +283,30 @@ def build_graph():
     return graph.compile()
 
 
+DEMO_INVOICE_TEXT = """\
+Northstar Office Supply
+Invoice #NS-4471
+Date: 2026-01-15
+
+Bill to: Accounts Payable
+
+Line items:
+  Copy paper, A4 -- qty 100 -- unit price 6.50 CAD
+
+Subtotal: 650.00 CAD
+Total: 650.00 CAD
+"""
+
 if __name__ == "__main__":
-    # TODO: replace this demo input with a real upload/API invocation.
+    # TODO: replace this demo input with a real upload/API invocation; document_text
+    # stands in for real PDF/OCR extraction, which isn't implemented yet.
     result = build_graph().invoke(
-        {"file_path": "sample-invoice.pdf", "retry_count": 0, "max_retries": 2, "audit_events": []}
+        {
+            "file_path": "sample-invoice.pdf",
+            "document_text": DEMO_INVOICE_TEXT,
+            "retry_count": 0,
+            "max_retries": 2,
+            "audit_events": [],
+        }
     )
     print(result)

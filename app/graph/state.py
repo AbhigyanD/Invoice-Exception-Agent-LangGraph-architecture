@@ -7,12 +7,14 @@ class InvoiceState(TypedDict, total=False):
     # Input and identity
     file_path: str
     file_hash: str
+    # Plain text pulled from the source document. TODO: replace with real
+    # PDF/OCR extraction; for now callers pass this in directly.
+    document_text: str
     invoice_id: int | str | None
     is_invoice: bool
     duplicate: bool
 
-    # Extracted invoice fields. TODO: replace the loose mapping with a validated
-    # Pydantic Invoice model once the extraction schema is implemented.
+    # Extracted invoice fields, shaped like app.graph.schemas.ExtractedInvoice.
     invoice_fields: dict[str, Any]
     validation_errors: list[str]
     retry_count: int
