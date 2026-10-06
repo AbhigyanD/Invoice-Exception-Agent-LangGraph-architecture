@@ -5,8 +5,12 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql://postgres:postgres@localhost:5544/invoice_agent"
+
+    llm_provider: str = "anthropic"  # "anthropic" or "groq"
     anthropic_api_key: str = ""
+    groq_api_key: str = ""
     llm_model: str = "claude-sonnet-5"
+
     api_key: str = "dev-key"
 
     max_repair_attempts: int = 2
